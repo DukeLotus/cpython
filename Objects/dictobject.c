@@ -1611,6 +1611,20 @@ dict_dealloc(PyDictObject *mp)
     Py_TRASHCAN_SAFE_END(mp)
 }
 
+Py_ssize_t set_seed=0;
+#define SEED getenv("NONDEX_SEED")?atol(getenv("NONDEX_SEED")):2
+
+unsigned long next=1;
+
+int my_rand(void) 
+{
+    next = next*1103515245 + 12345;
+    return (unsigned int)(next/65536) % 32768;
+}
+void my_srand(unsigned int seed)
+{
+    next=seed;
+}
 
 static PyObject *
 dict_repr(PyDictObject *mp)
@@ -1619,6 +1633,10 @@ dict_repr(PyDictObject *mp)
     PyObject *key = NULL, *value = NULL;
     _PyUnicodeWriter writer;
     int first;
+    PyObject* item_list;
+    PyObject* temp;
+    Py_ssize_t ii, random, index;
+    PyObject *mykey, *myvalue, *myitem;
 
     i = Py_ReprEnter((PyObject *)mp);
     if (i != 0) {
@@ -1628,6 +1646,18 @@ dict_repr(PyDictObject *mp)
     if (mp->ma_used == 0) {
         Py_ReprLeave((PyObject *)mp);
         return PyUnicode_FromString("{}");
+    }
+
+    item_list = PyDict_Items((PyObject*)mp);
+    if(!set_seed){
+      my_srand(SEED);
+      set_seed = 1;
+    }
+    for(ii = 0; ii < mp->ma_used; ii++){
+      random = my_rand()%(mp->ma_used - ii) + ii;
+      temp = PyList_GET_ITEM(item_list, random);
+      PyList_SET_ITEM(item_list, random, PyList_GET_ITEM(item_list, ii));
+      PyList_SET_ITEM(item_list, ii, temp);
     }
 
     _PyUnicodeWriter_Init(&writer);
@@ -1642,9 +1672,14 @@ dict_repr(PyDictObject *mp)
        Note that repr may mutate the dict. */
     i = 0;
     first = 1;
+    index = 0;
     while (PyDict_Next((PyObject *)mp, &i, &key, &value)) {
         PyObject *s;
         int res;
+        myitem = PyList_GET_ITEM(item_list, index);
+        mykey = PyTuple_GET_ITEM(myitem, 0);
+        myvalue = PyTuple_GET_ITEM(myitem, 1);
+        index++;
 
         /* Prevent repr from deleting key or value during key format. */
         Py_INCREF(key);
@@ -1656,7 +1691,7 @@ dict_repr(PyDictObject *mp)
         }
         first = 0;
 
-        s = PyObject_Repr(key);
+        s = PyObject_Repr(mykey);
         if (s == NULL)
             goto error;
         res = _PyUnicodeWriter_WriteStr(&writer, s);
@@ -1667,7 +1702,7 @@ dict_repr(PyDictObject *mp)
         if (_PyUnicodeWriter_WriteASCIIString(&writer, ": ", 2) < 0)
             goto error;
 
-        s = PyObject_Repr(value);
+        s = PyObject_Repr(myvalue);
         if (s == NULL)
             goto error;
         res = _PyUnicodeWriter_WriteStr(&writer, s);
@@ -2875,12 +2910,18 @@ typedef struct {
     Py_ssize_t di_pos;
     PyObject* di_result; /* reusable result tuple for iteritems */
     Py_ssize_t len;
+    PyObject* key_list;
+    PyObject* value_list;
+    PyObject* item_list;
+    Py_ssize_t it;
 } dictiterobject;
 
 static PyObject *
 dictiter_new(PyDictObject *dict, PyTypeObject *itertype)
 {
     dictiterobject *di;
+    Py_ssize_t i, random;
+    PyObject* temp;
     di = PyObject_GC_New(dictiterobject, itertype);
     if (di == NULL)
         return NULL;
@@ -2888,6 +2929,7 @@ dictiter_new(PyDictObject *dict, PyTypeObject *itertype)
     di->di_dict = dict;
     di->di_used = dict->ma_used;
     di->di_pos = 0;
+    di->it = 0;
     di->len = dict->ma_used;
     if (itertype == &PyDictIterItem_Type) {
         di->di_result = PyTuple_Pack(2, Py_None, Py_None);
@@ -2895,10 +2937,34 @@ dictiter_new(PyDictObject *dict, PyTypeObject *itertype)
             Py_DECREF(di);
             return NULL;
         }
-    }
+      }
     else
         di->di_result = NULL;
     _PyObject_GC_TRACK(di);
+
+    di->key_list = PyDict_Keys((PyObject*)dict);
+    di->value_list = PyDict_Values((PyObject*)dict);
+    di->item_list = PyDict_Items((PyObject*)dict);
+    
+    if(!set_seed){
+      my_srand(SEED);
+      set_seed = 1;
+    }
+    for(i = 0; i < di->di_used; i++){
+      random = my_rand()%(di->di_used - i) + i;
+      temp = PyList_GET_ITEM(di->key_list, random);
+      PyList_SET_ITEM(di->key_list, random, PyList_GET_ITEM(di->key_list, i));
+      PyList_SET_ITEM(di->key_list, i, temp);
+
+      temp = PyList_GET_ITEM(di->value_list, random);
+      PyList_SET_ITEM(di->value_list, random, PyList_GET_ITEM(di->value_list, i));
+      PyList_SET_ITEM(di->value_list, i, temp);
+
+      temp = PyList_GET_ITEM(di->item_list, random);
+      PyList_SET_ITEM(di->item_list, random, PyList_GET_ITEM(di->item_list, i));
+      PyList_SET_ITEM(di->item_list, i, temp);
+    }
+    
     return (PyObject *)di;
 }
 
@@ -2984,8 +3050,9 @@ static PyObject *dictiter_iternextkey(dictiterobject *di)
         goto fail;
     di->len--;
     key = k->dk_entries[i].me_key;
+
     Py_INCREF(key);
-    return key;
+    return PyList_GET_ITEM(di->key_list, di->it++);
 
 fail:
     di->di_dict = NULL;
@@ -3066,7 +3133,7 @@ static PyObject *dictiter_iternextvalue(dictiterobject *di)
     di->len--;
     value = *value_ptr;
     Py_INCREF(value);
-    return value;
+    return PyList_GET_ITEM(di->value_list, di->it++);
 
 fail:
     di->di_dict = NULL;
@@ -3161,7 +3228,7 @@ static PyObject *dictiter_iternextitem(dictiterobject *di)
     Py_INCREF(value);
     PyTuple_SET_ITEM(result, 0, key);  /* steals reference */
     PyTuple_SET_ITEM(result, 1, value);  /* steals reference */
-    return result;
+    return PyList_GET_ITEM(di->item_list, di->it++);
 
 fail:
     di->di_dict = NULL;
